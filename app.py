@@ -16,9 +16,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 IST                   = pytz.timezone("Asia/Kolkata")
-MAILTRACKING_WORKBOOK = "MailTracking"
+MAILTRACKING_WORKBOOK = "MailTracking"   # << fixed workbook name
 
-# Transparent 1×1 GIF payload
 PIXEL_BYTES = (
     b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00"
     b"\xFF\xFF\xFF!\xF9\x04\x01\x00\x00\x00\x00,"
@@ -26,17 +25,17 @@ PIXEL_BYTES = (
     b"L\x01\x00;"
 )
 
-# === Google Sheets client ===
+# === GOOGLE CREDS ===
 creds_info = json.loads(os.environ["GOOGLE_CREDS_JSON"])
 creds      = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
 gc         = gspread.authorize(creds)
 
 
-def update_sheet(
-    sheet,
+def update_open_tracking(
+    ws: gspread.Worksheet,
     email: str,
     sender: str,
-    timestamp: str,
+    open_ts: str,
     sheet_name: str = None,
     subject: str = None,
     timezone: str = None,
@@ -44,139 +43,133 @@ def update_sheet(
     template: str = None
 ):
     """
-    Update existing row for `email` or append new.
-    Ensures header row includes all columns, then updates/appends.
+    - Assumes row1 has: NAME | Email_ID | STATUS | SENDER | TIMESTAMP
+    - Ensures columns F–K exist:
+        Sheet_Name | Subject | Timezone | Start_Date | Template | Open_timestamp
+    - Finds row where Email_ID matches, updates those cells.
     """
-    # 1) Ensure header row exists
-    headers = sheet.row_values(1)
+    # 1) read existing header row (or create it if missing)
+    headers = ws.row_values(1)
     if not headers:
         headers = [
-            "Timestamp", "Status", "Email", "Open_count", "Last_Open",
-            "From", "Subject",
-            "Sheet_Name", "Timezone", "Start_Date", "Template"
+            "NAME","Email_ID","STATUS","SENDER","TIMESTAMP",
+            "Sheet_Name","Subject","Timezone","Start_Date","Template","Open_timestamp"
         ]
-        sheet.append_row(headers)
+        ws.append_row(headers)
 
-    # 2) Build header→index map
-    col_map = {h: i for i, h in enumerate(headers)}
-
-    # 3) Ensure metadata columns exist
-    for col in ["Sheet_Name", "Timezone", "Start_Date", "Template"]:
-        if col not in col_map:
+    lower = [h.lower() for h in headers]
+    required = [
+        "sheet_name","subject","timezone","start_date","template","open_timestamp"
+    ]
+    # 2) append any missing metadata columns
+    for col in required:
+        if col not in lower:
+            ws.update_cell(1, len(headers)+1, col.replace("_"," ").title())
             headers.append(col)
-            col_map[col] = len(headers) - 1
-            sheet.update_cell(1, len(headers), col)
+            lower.append(col)
 
-    # 4) Read existing rows
-    body = sheet.get_all_values()[1:]  # skip header
+    # 3) build map header→zero‐based index
+    idx = {h.lower(): i for i,h in enumerate(headers)}
 
-    # 5) Try update existing email row
-    for ridx, row in enumerate(body, start=2):
-        if row[col_map["Email"]].strip().lower() == email.lower():
-            # increment Open_count
-            new_count = int(row[col_map["Open_count"]] or "0") + 1
-            sheet.update_cell(ridx, col_map["Open_count"] + 1, str(new_count))
-
-            # update built-in fields
-            sheet.update_cell(ridx, col_map["Last_Open"] + 1, timestamp)
-            sheet.update_cell(ridx, col_map["Status"]    + 1, "OPENED")
-            sheet.update_cell(ridx, col_map["From"]      + 1, sender)
-
-            # update subject (always)
-            sheet.update_cell(ridx, col_map["Subject"] + 1, subject or "")
-
-            # update all four metadata columns
-            sheet.update_cell(ridx, col_map["Sheet_Name"] + 1, sheet_name or "")
-            sheet.update_cell(ridx, col_map["Timezone"]   + 1, timezone   or "")
-            sheet.update_cell(ridx, col_map["Start_Date"] + 1, start_date or "")
-            sheet.update_cell(ridx, col_map["Template"]   + 1, template   or "")
+    # 4) scan rows for matching Email_ID
+    rows = ws.get_all_values()[1:]
+    for r, row in enumerate(rows, start=2):
+        if row[idx["email_id"]].strip().lower() == email.lower():
+            # update OPEN_TIMESTAMP
+            ws.update_cell(r, idx["open_timestamp"]+1, open_ts)
+            # update other metadata
+            if sheet_name:
+                ws.update_cell(r, idx["sheet_name"]+1, sheet_name)
+            if subject:
+                ws.update_cell(r, idx["subject"]+1, subject)
+            if timezone:
+                ws.update_cell(r, idx["timezone"]+1, timezone)
+            if start_date:
+                ws.update_cell(r, idx["start_date"]+1, start_date)
+            if template:
+                ws.update_cell(r, idx["template"]+1, template)
             return
 
-    # 6) Append new row if no existing email
+    # 5) if not found, append a new row (optional)
     new_row = [""] * len(headers)
-    new_row[col_map["Timestamp"]]   = timestamp
-    new_row[col_map["Status"]]      = "OPENED"
-    new_row[col_map["Email"]]       = email
-    new_row[col_map["Open_count"]]  = "1"
-    new_row[col_map["Last_Open"]]   = timestamp
-    new_row[col_map["From"]]        = sender
-    new_row[col_map["Subject"]]     = subject or ""
-    new_row[col_map["Sheet_Name"]]  = sheet_name or ""
-    new_row[col_map["Timezone"]]    = timezone   or ""
-    new_row[col_map["Start_Date"]]  = start_date or ""
-    new_row[col_map["Template"]]    = template   or ""
+    new_row[ idx["email_id"]        ] = email
+    new_row[ idx["status"]          ] = "OPENED"
+    new_row[ idx["sender"]          ] = sender
+    new_row[ idx["timestamp"]       ] = open_ts
+    if sheet_name:
+        new_row[ idx["sheet_name"] ] = sheet_name
+    if subject:
+        new_row[ idx["subject"]    ] = subject
+    if timezone:
+        new_row[ idx["timezone"]   ] = timezone
+    if start_date:
+        new_row[ idx["start_date"] ] = start_date
+    if template:
+        new_row[ idx["template"]   ] = template
 
-    sheet.append_row(new_row)
+    ws.append_row(new_row)
 
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def track(path):
-    """
-    Tracking pixel endpoint.
-    Expects base64-encoded JSON metadata in the URL path.
-    """
-    now       = datetime.now(IST)
-    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    now    = datetime.now(IST)
+    open_ts = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Decode metadata token
+    # 1) decode metadata payload
     try:
         token   = path.split('.')[0]
         padded  = token + "=" * (-len(token) % 4)
         payload = base64.urlsafe_b64decode(padded.encode())
         info    = json.loads(payload).get("metadata", {})
     except Exception as e:
-        app.logger.error("Invalid metadata: %s", e)
+        app.logger.error("Bad metadata: %s", e)
         return send_file(io.BytesIO(PIXEL_BYTES), mimetype="image/gif")
 
-    # Extract fields
     email       = info.get("email")
     sender      = info.get("sender")
-    sheet_tab   = info.get("sheet")       # e.g. "USA", "Israel", etc.
-    sheet_name  = info.get("sheet_name")  # original EMAIL-status sheet
+    sheet_tab   = info.get("sheet")      # user‐chosen tab under MailTracking
+    sent_time   = info.get("sent_time")  # IST ISO timestamp
+    sheet_name  = info.get("sheet_name")
     subject     = info.get("subject")
     timezone    = info.get("timezone")
-    start_date  = info.get("date")        # "YYYY-MM-DD"
+    start_date  = info.get("date")
     template    = info.get("template")
-    sent_time_s = info.get("sent_time")   # IST ISO timestamp
 
-    # Skip early hits (Gmail proxy) < 7s
-    if sent_time_s:
+    # 2) skip early hits under 7s
+    if sent_time:
         try:
-            sent_dt = datetime.fromisoformat(sent_time_s)
+            sent_dt = datetime.fromisoformat(sent_time)
             if (now - sent_dt).total_seconds() < 7:
-                app.logger.info("Skipping early proxy hit for %s", email)
+                app.logger.info("Ignoring early hit for %s", email)
                 return send_file(io.BytesIO(PIXEL_BYTES), mimetype="image/gif")
-        except Exception as ex:
-            app.logger.error("Error parsing sent_time: %s", ex)
+        except Exception:
+            pass
 
-    # Open MailTracking and user-selected tab
+    # 3) open MailTracking and the specific worksheet
     try:
-        wb   = gc.open(MAILTRACKING_WORKBOOK)
-        tabs = [ws.title for ws in wb.worksheets()]
-        if not sheet_tab:
-            sheet_tab = tabs[0] if tabs else "USA"
-        if sheet_tab not in tabs:
+        wb = gc.open(MAILTRACKING_WORKBOOK)
+        if sheet_tab not in [ws.title for ws in wb.worksheets()]:
             wb.add_worksheet(title=sheet_tab, rows="1000", cols="20")
-        sheet = wb.worksheet(sheet_tab)
+        ws = wb.worksheet(sheet_tab)
     except Exception as e:
         app.logger.error("Cannot open workbook/tab: %s", e)
         return send_file(io.BytesIO(PIXEL_BYTES), mimetype="image/gif")
 
-    # Record the open
+    # 4) record the open
     if email and sender:
-        update_sheet(
-            sheet,
+        update_open_tracking(
+            ws,
             email=email,
             sender=sender,
-            timestamp=timestamp,
+            open_ts=open_ts,
             sheet_name=sheet_name,
             subject=subject,
             timezone=timezone,
             start_date=start_date,
             template=template
         )
-        app.logger.info("Tracked open: %s → %s at %s", email, sheet_tab, timestamp)
+        app.logger.info("Logged open for %s in %s at %s", email, sheet_tab, open_ts)
 
     return send_file(io.BytesIO(PIXEL_BYTES), mimetype="image/gif")
 
