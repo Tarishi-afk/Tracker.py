@@ -51,9 +51,9 @@ def update_sheet(
     headers = sheet.row_values(1)
     if not headers:
         headers = [
-            "Open_timestamp", "Open_status", "Leads_email", "Open_count",
-            "Last_open_timestamp", "From", "Subject", "Campaign_name",
-            "Timezone", "Start_Date", "Template"
+            "Timestamp", "Status", "Email", "Open_count", "Last_Open",
+            "From", "Subject", "Sheet_Name", "Timezone",
+            "Start_Date", "Template"
         ]
         sheet.append_row(headers)
 
@@ -62,8 +62,8 @@ def update_sheet(
 
     # 3) Ensure all needed columns present
     required = [
-        "Open_status", "Open_count", "Last_open_timestamp", "From", "Subject",
-        "Campaign_name", "Timezone", "Start_Date", "Template"
+        "Status", "Open_count", "Last_Open", "From", "Subject",
+        "Sheet_Name", "Timezone", "Start_Date", "Template"
     ]
     for col in required:
         if col not in col_map:
@@ -76,44 +76,44 @@ def update_sheet(
 
     # 5) Try update existing email row
     for ridx, row in enumerate(body, start=2):
-        if row[col_map["Leads_email"]].strip().lower() == email.lower():
+        if row[col_map["Email"]].strip().lower() == email.lower():
             # increment open count
             count = int(row[col_map["Open_count"]] or "0") + 1
             sheet.update_cell(ridx, col_map["Open_count"] + 1, str(count))
-
-            # update renamed fields
-            sheet.update_cell(ridx, col_map["Open_timestamp"] + 1, timestamp)
-            sheet.update_cell(ridx, col_map["Open_status"]    + 1, "OPENED")
-            sheet.update_cell(ridx, col_map["From"]           + 1, sender)
-
-            # update subject
+            # update metadata
+            sheet.update_cell(ridx, col_map["Last_Open"] + 1, timestamp)
+            sheet.update_cell(ridx, col_map["Status"] + 1, "OPENED")
+            sheet.update_cell(ridx, col_map["From"] + 1, sender)
             if subject:
                 sheet.update_cell(ridx, col_map["Subject"] + 1, subject)
-
-            # update renamed metadata
             if sheet_name:
-                sheet.update_cell(ridx, col_map["Campaign_name"] + 1, sheet_name)
+                sheet.update_cell(ridx, col_map["Sheet_Name"] + 1, sheet_name)
             if timezone:
-                sheet.update_cell(ridx, col_map["Timezone"]      + 1, timezone)
+                sheet.update_cell(ridx, col_map["Timezone"] + 1, timezone)
             if start_date:
-                sheet.update_cell(ridx, col_map["Start_Date"]     + 1, start_date)
+                sheet.update_cell(ridx, col_map["Start_Date"] + 1, start_date)
             if template:
-                sheet.update_cell(ridx, col_map["Template"]       + 1, template)
+                sheet.update_cell(ridx, col_map["Template"] + 1, template)
             return
 
     # 6) Append new row
     new_row = [""] * len(headers)
-    new_row[col_map["Open_timestamp"]]        = timestamp
-    new_row[col_map["Open_status"]]           = "OPENED"
-    new_row[col_map["Leads_email"]]           = email
-    new_row[col_map["Open_count"]]            = "1"
-    new_row[col_map["Last_open_timestamp"]]   = timestamp
-    new_row[col_map["From"]]                  = sender
-    new_row[col_map["Subject"]]               = subject or ""
-    new_row[col_map["Campaign_name"]]         = sheet_name or ""
-    new_row[col_map["Timezone"]]              = timezone or ""
-    new_row[col_map["Start_Date"]]            = start_date or ""
-    new_row[col_map["Template"]]              = template or ""
+    new_row[col_map["Timestamp"]]   = timestamp
+    new_row[col_map["Status"]]      = "OPENED"
+    new_row[col_map["Email"]]       = email
+    new_row[col_map["Open_count"]]  = "1"
+    new_row[col_map["Last_Open"]]   = timestamp
+    new_row[col_map["From"]]        = sender
+    if subject:
+        new_row[col_map["Subject"]] = subject
+    if sheet_name:
+        new_row[col_map["Sheet_Name"]] = sheet_name
+    if timezone:
+        new_row[col_map["Timezone"]] = timezone
+    if start_date:
+        new_row[col_map["Start_Date"]] = start_date
+    if template:
+        new_row[col_map["Template"]] = template
 
     sheet.append_row(new_row)
 
@@ -141,25 +141,30 @@ def track(path):
     # Extract fields
     email       = info.get("email")
     sender      = info.get("sender")
-    sheet_tab   = info.get("sheet")
-    sheet_name  = info.get("sheet_name")
+    sheet_tab   = info.get("sheet")       # e.g. "USA", "Israel", etc.
+    sheet_name  = info.get("sheet_name")  # original EMAIL-status sheet
     subject     = info.get("subject")
     timezone    = info.get("timezone")
-    start_date  = info.get("date")
+    start_date  = info.get("date")        # "YYYY-MM-DD"
     template    = info.get("template")
-    sent_time_s = info.get("sent_time")
+    sent_time_s = info.get("sent_time")   # e.g. "2025-07-23T14:05:30+05:30" or "YYYY-MM-DD HH:MM:SS+0530"
 
-    # Skip early hits < 7s
+    # Skip early hits (Gmail proxy). If sent_time included, compare delta < 7s
     if sent_time_s:
         try:
-            sent_dt = datetime.fromisoformat(sent_time_s)
-            if (now - sent_dt).total_seconds() < 7:
-                app.logger.info("Skipping early hit for %s", email)
+            # handle ISO or space‐separated format
+            if "T" in sent_time_s:
+                sent_dt = datetime.fromisoformat(sent_time_s)
+            else:
+                sent_dt = datetime.strptime(sent_time_s, "%Y-%m-%d %H:%M:%S%z")
+            delta = (now - sent_dt).total_seconds()
+            if delta < 7:
+                app.logger.info("Skipping early proxy hit for %s (Δ=%.1fs)", email, delta)
                 return send_file(io.BytesIO(PIXEL_BYTES), mimetype="image/gif")
-        except Exception:
-            pass
+        except Exception as ex:
+            app.logger.error("Error parsing sent_time: %s", ex)
 
-    # Open workbook & tab
+    # Open MailTracking workbook & selected tab
     try:
         wb   = gc.open(MAILTRACKING_WORKBOOK)
         tabs = [ws.title for ws in wb.worksheets()]
