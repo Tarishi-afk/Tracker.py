@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file
+from flask import Flask, send_file
 from datetime import datetime
 import base64
 import json
@@ -33,7 +33,7 @@ gc         = gspread.authorize(creds)
 
 
 def update_sheet(
-    sheet: gspread.Worksheet,
+    sheet,
     email: str,
     sender: str,
     timestamp: str,
@@ -98,12 +98,12 @@ def update_sheet(
 
     # 6) Append new row
     new_row = [""] * len(headers)
-    new_row[col_map["Timestamp"]] = timestamp
-    new_row[col_map["Status"]]    = "OPENED"
-    new_row[col_map["Email"]]     = email
-    new_row[col_map["Open_count"]]= "1"
-    new_row[col_map["Last_Open"]]= timestamp
-    new_row[col_map["From"]]     = sender
+    new_row[col_map["Timestamp"]]   = timestamp
+    new_row[col_map["Status"]]      = "OPENED"
+    new_row[col_map["Email"]]       = email
+    new_row[col_map["Open_count"]]  = "1"
+    new_row[col_map["Last_Open"]]   = timestamp
+    new_row[col_map["From"]]        = sender
     if subject:
         new_row[col_map["Subject"]] = subject
     if sheet_name:
@@ -147,6 +147,22 @@ def track(path):
     timezone    = info.get("timezone")
     start_date  = info.get("date")        # "YYYY-MM-DD"
     template    = info.get("template")
+    sent_time_s = info.get("sent_time")   # e.g. "2025-07-23T14:05:30+05:30" or "YYYY-MM-DD HH:MM:SS+0530"
+
+    # Skip early hits (Gmail proxy). If sent_time included, compare delta < 7s
+    if sent_time_s:
+        try:
+            # handle ISO or space‐separated format
+            if "T" in sent_time_s:
+                sent_dt = datetime.fromisoformat(sent_time_s)
+            else:
+                sent_dt = datetime.strptime(sent_time_s, "%Y-%m-%d %H:%M:%S%z")
+            delta = (now - sent_dt).total_seconds()
+            if delta < 7:
+                app.logger.info("Skipping early proxy hit for %s (Δ=%.1fs)", email, delta)
+                return send_file(io.BytesIO(PIXEL_BYTES), mimetype="image/gif")
+        except Exception as ex:
+            app.logger.error("Error parsing sent_time: %s", ex)
 
     # Open MailTracking workbook & selected tab
     try:
